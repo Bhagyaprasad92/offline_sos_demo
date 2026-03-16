@@ -1,7 +1,12 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:screen_state/screen_state.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:vibration/vibration.dart';
+import 'package:torch_light/torch_light.dart';
+import 'package:volume_controller/volume_controller.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:telephony_fix/telephony.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -48,19 +53,214 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   StreamSubscription? _accelSub;
   StreamSubscription? _gyroSub;
 
+  // --- 3. Speed & Voice Warning Variables ---
+  final FlutterTts flutterTts = FlutterTts();
+  StreamSubscription<Position>? _positionStreamSub;
+
+  bool useMs = true; // TOGGLE: true = m/s (Demo), false = km/h (Real)
+  double currentSpeedRawMs = 0.0; // Store pure hardware speed
+
+  // HARDWARE DEMO THRESHOLDS (in meters/second)
+  final double overspeedLimitMs = 2.0; // ~7.2 km/h (Brisk Walk/Jog)
+  final double distractionLimitMs = 1.0; // ~3.6 km/h (Slow Walk)
+
+  DateTime? lastWarningTime;
+
+  // --- 4. Distracted Driving Variables ---
+  final Screen _screen = Screen();
+  StreamSubscription<ScreenStateEvent>? _screenStateSub;
+  bool isScreenOn = true; // Assume true when app opens
+  Timer? distractionTimer;
+  int distractionSeconds = 0;
+  final int distractionDemoThreshold = 15; // Trigger at 15s for the demo
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadAIModel();
+    _initTTS(); // <-- ADD THIS
+    _initScreenState(); // <-- Add this
+    _startSpeedMonitoring(); // <-- ADD THIS
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _stopMonitoring();
+    _stopDistractionTimer(); // <-- Add this
     _interpreter?.close();
+    _positionStreamSub?.cancel(); // <-- ADD THIS
+    _screenStateSub?.cancel(); // <-- Add this
     super.dispose();
+  }
+
+  void _initScreenState() {
+    try {
+      _screenStateSub = _screen.screenStateStream.listen((
+        ScreenStateEvent event,
+      ) {
+        if (event == ScreenStateEvent.SCREEN_ON ||
+            event == ScreenStateEvent.SCREEN_UNLOCKED) {
+          isScreenOn = true;
+          addLog("📱 System: Screen Turned ON");
+        } else if (event == ScreenStateEvent.SCREEN_OFF) {
+          isScreenOn = false;
+          addLog("📵 System: Screen Locked (Safe)");
+          _stopDistractionTimer(); // Stop warning them, they listened!
+        }
+      });
+    } catch (e) {
+      addLog("Screen State Error: $e");
+    }
+  }
+
+  void _startDistractionTimer() {
+    addLog("👀 Distraction tracker started (Speeding + Screen ON)");
+    distractionSeconds = 0;
+
+    distractionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted) {
+        setState(() => distractionSeconds++);
+      }
+
+      if (distractionSeconds == distractionDemoThreshold) {
+        flutterTts.speak(
+          "Warning! Distracted driving detected. Please put your phone away.",
+        );
+        addLog("🚨 DISTRACTED DRIVING WARNING ISSUED");
+      } else if (distractionSeconds > distractionDemoThreshold &&
+          distractionSeconds % 10 == 0) {
+        flutterTts.speak("Please lock your screen immediately.");
+      }
+    });
+  }
+
+  void _stopDistractionTimer() {
+    if (distractionTimer != null && distractionTimer!.isActive) {
+      distractionTimer!.cancel();
+      if (mounted) {
+        setState(() => distractionSeconds = 0);
+      }
+      addLog("✅ Distraction averted.");
+    }
+  }
+
+  Future<void> _initTTS() async {
+    await flutterTts.setLanguage("en-IN");
+    await flutterTts.setSpeechRate(0.5);
+    await flutterTts.setVolume(1.0);
+    // CRITICAL: Force the code to wait until the voice stops speaking
+    await flutterTts.awaitSpeakCompletion(true);
+  }
+
+  void _startSpeedMonitoring() async {
+    await Permission.location.request();
+    addLog("🛰️ GPS Speed Stream Active...");
+
+    // 1. OPTIMIZE GPS: Re-add a small distance filter. 
+    // Setting this to 0 breaks speed math on some Android hardware!
+    const LocationSettings locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.bestForNavigation,
+      distanceFilter: 1, // Send update every 1 meter of movement
+    );
+
+    _positionStreamSub = Geolocator.getPositionStream(
+      locationSettings: locationSettings,
+    ).listen((Position position) {
+      double rawMs = position.speed; // Natively in m/s
+
+      // 2. THE NOISE GATE: Lowered to 0.2 m/s to easily catch walking
+      // while still blocking "phantom" jitter when the phone is on a desk.
+      if (rawMs < 0.2) {
+        rawMs = 0.0;
+      }
+
+      if (mounted) {
+        setState(() {
+          currentSpeedRawMs = rawMs;
+        });
+      }
+
+      // 1. OVERSPEED LOGIC (Trigger at 2.0 m/s)
+      if (rawMs > overspeedLimitMs) {
+        _triggerVoiceWarning();
+      }
+
+      // 2. DISTRACTED DRIVING LOGIC (Trigger moving > 1.0 m/s with screen ON)
+      if (rawMs > distractionLimitMs && isScreenOn) {
+        if (distractionTimer == null || !distractionTimer!.isActive) {
+          _startDistractionTimer();
+        }
+      } else if (rawMs <= distractionLimitMs) {
+        _stopDistractionTimer();
+      }
+    });
+  }
+
+  Future<void> _triggerHardwareAlert() async {
+    // 1. Vibrate (Pattern: Wait 0ms, Vibrate 500ms, Wait 500ms, Vibrate 500ms...)
+    try {
+      bool? hasVibrator = await Vibration.hasVibrator();
+      if (hasVibrator == true) {
+        Vibration.vibrate(pattern: [0, 500, 500, 500, 500, 500]);
+      }
+    } catch (e) {
+      addLog("Vibration error: $e");
+    }
+
+    // 2. Flashlight Blink (3 times)
+    try {
+      bool hasTorch = await TorchLight.isTorchAvailable();
+      if (hasTorch) {
+        for (int i = 0; i < 3; i++) {
+          await TorchLight.enableTorch();
+          await Future.delayed(const Duration(milliseconds: 300));
+          await TorchLight.disableTorch();
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+      }
+    } catch (e) {
+      addLog("Torch error: $e");
+    }
+  }
+
+  void _triggerVoiceWarning() async {
+    // Increased cooldown to 15 seconds because speaking 3 times takes about 10 seconds
+    if (lastWarningTime == null ||
+        DateTime.now().difference(lastWarningTime!) >
+            const Duration(seconds: 15)) {
+      lastWarningTime = DateTime.now();
+
+      double displaySpeed = useMs ? currentSpeedRawMs : currentSpeedRawMs * 3.6;
+      String unit = useMs ? "m/s" : "km/h";
+
+      addLog(
+        "⚠️ SPEED LIMIT EXCEEDED: ${displaySpeed.toStringAsFixed(1)} $unit",
+      );
+
+      // 🔥 1. FORCE SYSTEM VOLUME TO MAX (100%)
+      try {
+        // Set to 1.0 (max) and hide the native Android volume slider popup
+        VolumeController.instance.showSystemUI = false;
+        VolumeController.instance.setVolume(1.0);
+        addLog("🔊 System media volume forced to MAXIMUM.");
+      } catch (e) {
+        addLog("Volume override error: $e");
+      }
+
+      // 🔥 2. Fire hardware alerts concurrently (Do NOT use await here)
+      _triggerHardwareAlert();
+
+      // 🗣️ 3. Speak exactly 3 times sequentially
+      for (int i = 0; i < 3; i++) {
+        await flutterTts.speak(
+          "Warning! Reduce your speed. You are moving too fast.",
+        );
+        // Small 500ms gap between sentences so they don't sound rushed
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
   }
 
   void addLog(String message) {
@@ -323,6 +523,118 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 20),
+
+            // --- LIVE SPEEDOMETER UI ---
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  "Speed Unit:",
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                ToggleButtons(
+                  borderRadius: BorderRadius.circular(8),
+                  isSelected: [!useMs, useMs],
+                  onPressed: (int index) {
+                    setState(() {
+                      useMs = index == 1;
+                    });
+                  },
+                  children: const [
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      child: Text("km/h"),
+                    ),
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      child: Text("m/s (Demo)"),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color:
+                    currentSpeedRawMs > overspeedLimitMs
+                        ? Colors.red.shade100
+                        : Colors.blue.shade50,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color:
+                      currentSpeedRawMs > overspeedLimitMs
+                          ? Colors.red
+                          : Colors.blue,
+                  width: 2,
+                ),
+              ),
+              child: Column(
+                children: [
+                  const Text(
+                    "LIVE SPEED",
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black54,
+                    ),
+                  ),
+                  Text(
+                    useMs
+                        ? "${currentSpeedRawMs.toStringAsFixed(1)} m/s"
+                        : "${(currentSpeedRawMs * 3.6).toStringAsFixed(1)} km/h",
+                    style: TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.bold,
+                      color:
+                          currentSpeedRawMs > overspeedLimitMs
+                              ? Colors.red
+                              : Colors.black87,
+                    ),
+                  ),
+                  Text(
+                    "Limit: ${useMs ? overspeedLimitMs.toStringAsFixed(1) + " m/s" : (overspeedLimitMs * 3.6).toStringAsFixed(1) + " km/h"}",
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // --- DISTRACTION TRACKER UI ---
+            if (distractionSeconds > 0)
+              Container(
+                margin: const EdgeInsets.only(bottom: 20),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade100,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.orange, width: 2),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.phone_android,
+                      color: Colors.orange,
+                      size: 30,
+                    ),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        "Distraction Tracker: ${distractionSeconds}s\n(Screen is ON while moving)",
+                        style: const TextStyle(
+                          color: Colors.orange,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
 
             // 🚀 Replaced manual button with AI Toggle
             ElevatedButton.icon(

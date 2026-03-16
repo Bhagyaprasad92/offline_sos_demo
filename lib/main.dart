@@ -32,15 +32,12 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   List<String> logs = [];
   bool isProcessing = false;
   bool _isAwaitingCallReturn = false;
-  final List<String> emergencyContacts = [
-    "+919963093026",
-    "+916305259511",
-    "+919381363374",
-    "+918143837005",
-    "+916305560939",
-    "+919391479869",
-    "+919435608337",
-  ];
+  final List<String> emergencyContacts = ["+919963093026", "+916305259511"];
+  // "+919381363374",
+  // "+918143837005",
+  // "+916305560939",
+  // "+919391479869",
+  // "+919435608337",
   // --- 2. AI Sensor Variables ---
   Interpreter? _interpreter;
   bool isMonitoring = false;
@@ -204,9 +201,9 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
           "Broadcasting offline SMS to ${emergencyContacts.length} contacts...",
         );
 
-        int completedSmsCount = 0;
         Set<String> processedNumbers = {};
 
+        // 1. Dispatch SMS asynchronously
         for (String number in emergencyContacts) {
           telephony.sendSms(
             to: number,
@@ -216,21 +213,22 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
               if (status == SendStatus.SENT) {
                 addLog("SUCCESS: SMS to $number.");
                 processedNumbers.add(number);
-                completedSmsCount++;
               } else if (status != SendStatus.DELIVERED) {
                 addLog("FAILED: SMS to $number.");
                 processedNumbers.add(number);
-                completedSmsCount++;
               }
-
-              if (completedSmsCount == emergencyContacts.length && mounted) {
-                setState(() => isProcessing = false);
-              }
+              // Removed the UI loader logic from here to prevent background locking
             },
           );
           await Future.delayed(const Duration(milliseconds: 300));
         }
 
+        // 2. Stop the loader BEFORE launching the native phone dialer
+        if (mounted) {
+          setState(() => isProcessing = false);
+        }
+
+        // 3. Launch the call
         if (emergencyContacts.isNotEmpty) {
           String primaryContact = emergencyContacts.first;
           addLog("Initiating Fallback Call to $primaryContact...");

@@ -45,6 +45,10 @@ dependencies:
   vibration: ^3.1.8
   torch_light: ^1.1.0
   volume_controller: ^3.4.2
+  flutter_background_service: ^5.1.0
+  flutter_local_notifications: ^19.5.0
+  battery_plus: ^7.0.0
+  shared_preferences: ^2.5.3
 
 dev_dependencies:
   flutter_test:
@@ -100,3 +104,4 @@ flutter:
 
 dependency_overrides:
   device_info_plus: 10.1.2
+  battery_plus: 6.0.1

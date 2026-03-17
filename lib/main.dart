@@ -13,8 +13,188 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:battery_plus/battery_plus.dart'; 
+import 'package:shared_preferences/shared_preferences.dart'; 
+import 'dart:ui'; 
 
-void main() {
+// 🧠 ADD THIS: Background handler to catch the "Hide" button press
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse notificationResponse) async {
+  if (notificationResponse.actionId == 'hide_battery_alert') {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('hide_battery_alert', true);
+  }
+}
+
+// 🧠 THIS IS THE SECOND BRAIN: The 5-Second Watchdog
+@pragma('vm:entry-point')
+void onStart(ServiceInstance service) async {
+  DartPluginRegistrant.ensureInitialized();
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+
+  // 🚨 CRITICAL FIX: Initialize the plugin with your app's default icon!
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+      
+  // UPDATE THIS LINE: Link the background handler we created above
+  await flutterLocalNotificationsPlugin.initialize(
+    initializationSettings,
+    onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+  );
+
+  final Battery battery = Battery();
+
+  // Listen for a command from the UI to shut down
+  service.on('stopService').listen((event) async {
+    await flutterLocalNotificationsPlugin.cancelAll(); // Wipe all notifications
+    service.stopSelf();
+  });
+
+  // ⏱️ THE 5-SECOND WATCHDOG LOOP
+  Timer.periodic(const Duration(seconds: 5), (timer) async {
+    if (service is AndroidServiceInstance) {
+      if (await service.isForegroundService()) {
+        
+        // 1. REVIVE MAIN NOTIFICATION (Silent)
+        flutterLocalNotificationsPlugin.show(
+          888,
+          '🛡️ SafePulse AI Active',
+          'Monitoring sensors and location autonomously.',
+          const NotificationDetails(
+            android: AndroidNotificationDetails(
+              'safepulse_silent_v4', // Upgraded ID
+              'SafePulse AI Service',
+              ongoing: true,
+              importance: Importance.low, // Guarantees no sound/popup
+              priority: Priority.low,
+            ),
+          ),
+        );
+      }
+    }
+
+    // 2. CHECK LOCATION HARDWARE
+    bool isLocationOn = false;
+    try {
+      isLocationOn = await Geolocator.isLocationServiceEnabled();
+    } catch (e) {
+      // Catch in case geolocator isn't ready in the background yet
+    }
+    
+    if (!isLocationOn) {
+      flutterLocalNotificationsPlugin.show(
+        889,
+        '⚠️ SafePulse: Location Disabled',
+        'Turn on Location so SOS can broadcast your coordinates.',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'safepulse_alerts_v1',
+            'System Alerts',
+            importance: Importance.low, // Silent warning
+            priority: Priority.low,
+          ),
+        ),
+      );
+    } else {
+      flutterLocalNotificationsPlugin.cancel(889); // Clear if turned back on
+    }
+
+    // 3. CHECK BATTERY SAVER
+    bool isBatterySaverOn = false;
+    try {
+      isBatterySaverOn = await battery.isInBatterySaveMode;
+    } catch (e) {}
+
+    // Check if the user clicked "Hide"
+    final prefs = await SharedPreferences.getInstance();
+    bool isAlertHidden = prefs.getBool('hide_battery_alert') ?? false;
+
+    if (isBatterySaverOn && !isAlertHidden) {
+      flutterLocalNotificationsPlugin.show(
+        890,
+        '⚠️ SafePulse: Battery Saver Active',
+        'Disable Battery Saver to prevent Android from killing the AI sensors.',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'safepulse_alerts_v1',
+            'System Alerts',
+            importance: Importance.low, 
+            priority: Priority.low,
+            // ADD THIS: The Action Button
+            actions: <AndroidNotificationAction>[
+              AndroidNotificationAction(
+                'hide_battery_alert', // Must match the ID in the background handler
+                'Hide',
+                cancelNotification: true, // Dismisses immediately upon tap
+              ),
+            ],
+          ),
+        ),
+      );
+    } else if (!isBatterySaverOn) {
+      // If they turn Battery Saver off, reset the flag so it can warn them next time
+      await prefs.setBool('hide_battery_alert', false); 
+      flutterLocalNotificationsPlugin.cancel(890); 
+    }
+  });
+}
+
+Future<void> initializeService() async {
+  final service = FlutterBackgroundService();
+
+  // Main Silent Channel
+  const AndroidNotificationChannel channel = AndroidNotificationChannel(
+    'safepulse_silent_v4', // Bumping ID to flush cache
+    'SafePulse AI Service',
+    description: 'Keeps SafePulse running silently in the background.',
+    importance: Importance.low, 
+  );
+
+  // Alert Silent Channel
+  const AndroidNotificationChannel alertChannel = AndroidNotificationChannel(
+    'safepulse_alerts_v1', 
+    'System Alerts',
+    description: 'Warnings for GPS and Battery Saver.',
+    importance: Importance.low, 
+  );
+
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
+      
+  await flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(alertChannel);
+
+  await service.configure(
+    androidConfiguration: AndroidConfiguration(
+      onStart: onStart, 
+      autoStart: false, 
+      isForegroundMode: true, 
+      notificationChannelId: 'safepulse_silent_v4', 
+      initialNotificationTitle: '🛡️ SafePulse AI Active',
+      initialNotificationContent: 'Monitoring sensors...',
+      foregroundServiceNotificationId: 888,
+    ),
+    iosConfiguration: IosConfiguration(
+      autoStart: false,
+      onForeground: onStart,
+    ),
+  );
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeService(); // Boot up the background infrastructure
   runApp(
     const MaterialApp(
       home: AutonomousSOSScreen(),
@@ -81,10 +261,45 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    
+    // Wait for the UI to render the first frame before throwing popups
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _requestAllPermissionsUpfront(); 
+    });
+
     _loadAIModel();
-    _initTTS(); // <-- ADD THIS
-    _initScreenState(); // <-- Add this
-    _startSpeedMonitoring(); // <-- ADD THIS
+    _initTTS(); 
+    _initScreenState(); 
+    _startSpeedMonitoring(); 
+  }
+
+  Future<void> _requestAllPermissionsUpfront() async {
+    addLog("🔒 Requesting system permissions...");
+    
+    // 1. Request standard permissions first (DO NOT include locationAlways here)
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.location,
+      Permission.sms,
+      Permission.phone,
+      Permission.notification, 
+    ].request();
+
+    // 2. Request Background Location ONLY AFTER standard location is granted
+    if (statuses[Permission.location]?.isGranted == true) {
+      PermissionStatus bgStatus = await Permission.locationAlways.request();
+      if (!bgStatus.isGranted) {
+        addLog("⚠️ Background Location denied. App won't work in pocket.");
+      }
+    }
+
+    // Check if everything is good
+    if (await Permission.sms.isGranted && 
+        await Permission.phone.isGranted && 
+        await Permission.location.isGranted) {
+      addLog("✅ All critical permissions secured.");
+    } else {
+      addLog("❌ WARNING: Missing critical permissions!");
+    }
   }
 
   @override
@@ -158,7 +373,6 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   }
 
   void _startSpeedMonitoring() async {
-    await Permission.location.request();
     addLog("🛰️ GPS Speed Stream Active...");
 
     // 1. OPTIMIZE GPS: Re-add a small distance filter.
@@ -297,9 +511,15 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
     }
   }
 
-  void _startMonitoring() {
+  void _startMonitoring() async {
     setState(() => isMonitoring = true);
-    addLog("🛡️ AI Dashcam STARTED. Listening at 50Hz...");
+    addLog("🛡️ AI Dashcam STARTED. Igniting Foreground Service...");
+
+    // 🚀 1. IGNITE THE UN-KILLABLE BACKGROUND SERVICE
+    final service = FlutterBackgroundService();
+    await service.startService();
+
+    // 2. Start UI Sensors 
     sensorBuffer.clear();
 
     _accelSub = userAccelerometerEventStream().listen((event) {
@@ -320,7 +540,6 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
         sensorBuffer.removeAt(0); // Keep exactly 5 seconds of memory
       }
 
-      // The Heuristic Gate: Detect 3.0+ G-Force (Lowered for safe mattress testing)
       double gForce = sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2)) / 9.81;
 
       if (gForce > 3.0 && sensorBuffer.length == 250) {
@@ -333,6 +552,11 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
 
   void _stopMonitoring() {
     setState(() => isMonitoring = false);
+    
+    // 🛑 1. SEND KILL SIGNAL TO BACKGROUND SERVICE
+    FlutterBackgroundService().invoke('stopService');
+
+    // 2. Kill UI Sensors
     _sensorTimer?.cancel();
     _accelSub?.cancel();
     _gyroSub?.cancel();
@@ -370,16 +594,11 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   // ==========================================
   // 🚀 PHASE 2: AUTOMATED SOS EXECUTION
   // ==========================================
-  Future<void> requestPermissions() async {
-    await [Permission.location, Permission.sms, Permission.phone].request();
-    addLog("Permissions verified.");
-  }
+
 
   Future<void> triggerSOS() async {
     setState(() => isProcessing = true);
     addLog("🚀 SOS TRIGGERED AUTONOMOUSLY BY AI!");
-
-    await requestPermissions();
 
     try {
       final connectivityResult = await (Connectivity().checkConnectivity());

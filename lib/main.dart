@@ -37,12 +37,15 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   List<String> logs = [];
   bool isProcessing = false;
   bool _isAwaitingCallReturn = false;
-  final List<String> emergencyContacts = ["+919963093026", "+916305259511"];
-  // "+919381363374",
-  // "+918143837005",
-  // "+916305560939",
-  // "+919391479869",
-  // "+919435608337",
+  final List<String> emergencyContacts = [
+    "+916305259511",
+    "+919381363374",
+    "+918143837005",
+    "+916305560939",
+    "+919391479869",
+    "+919435608337",
+    "+919963093026",
+  ];
   // --- 2. AI Sensor Variables ---
   Interpreter? _interpreter;
   bool isMonitoring = false;
@@ -158,7 +161,7 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
     await Permission.location.request();
     addLog("🛰️ GPS Speed Stream Active...");
 
-    // 1. OPTIMIZE GPS: Re-add a small distance filter. 
+    // 1. OPTIMIZE GPS: Re-add a small distance filter.
     // Setting this to 0 breaks speed math on some Android hardware!
     const LocationSettings locationSettings = LocationSettings(
       accuracy: LocationAccuracy.bestForNavigation,

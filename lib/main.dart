@@ -15,13 +15,15 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:battery_plus/battery_plus.dart'; 
-import 'package:shared_preferences/shared_preferences.dart'; 
-import 'dart:ui'; 
+import 'package:battery_plus/battery_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:ui';
 
 // 🧠 ADD THIS: Background handler to catch the "Hide" button press
 @pragma('vm:entry-point')
-void notificationTapBackground(NotificationResponse notificationResponse) async {
+void notificationTapBackground(
+  NotificationResponse notificationResponse,
+) async {
   if (notificationResponse.actionId == 'hide_battery_alert') {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('hide_battery_alert', true);
@@ -39,9 +41,10 @@ void onStart(ServiceInstance service) async {
   // 🚨 CRITICAL FIX: Initialize the plugin with your app's default icon!
   const AndroidInitializationSettings initializationSettingsAndroid =
       AndroidInitializationSettings('@mipmap/ic_launcher');
-  const InitializationSettings initializationSettings =
-      InitializationSettings(android: initializationSettingsAndroid);
-      
+  const InitializationSettings initializationSettings = InitializationSettings(
+    android: initializationSettingsAndroid,
+  );
+
   // UPDATE THIS LINE: Link the background handler we created above
   await flutterLocalNotificationsPlugin.initialize(
     initializationSettings,
@@ -60,7 +63,6 @@ void onStart(ServiceInstance service) async {
   Timer.periodic(const Duration(seconds: 5), (timer) async {
     if (service is AndroidServiceInstance) {
       if (await service.isForegroundService()) {
-        
         // 1. REVIVE MAIN NOTIFICATION (Silent)
         flutterLocalNotificationsPlugin.show(
           888,
@@ -86,7 +88,7 @@ void onStart(ServiceInstance service) async {
     } catch (e) {
       // Catch in case geolocator isn't ready in the background yet
     }
-    
+
     if (!isLocationOn) {
       flutterLocalNotificationsPlugin.show(
         889,
@@ -124,7 +126,7 @@ void onStart(ServiceInstance service) async {
           android: AndroidNotificationDetails(
             'safepulse_alerts_v1',
             'System Alerts',
-            importance: Importance.low, 
+            importance: Importance.low,
             priority: Priority.low,
             // ADD THIS: The Action Button
             actions: <AndroidNotificationAction>[
@@ -139,8 +141,8 @@ void onStart(ServiceInstance service) async {
       );
     } else if (!isBatterySaverOn) {
       // If they turn Battery Saver off, reset the flag so it can warn them next time
-      await prefs.setBool('hide_battery_alert', false); 
-      flutterLocalNotificationsPlugin.cancel(890); 
+      await prefs.setBool('hide_battery_alert', false);
+      flutterLocalNotificationsPlugin.cancel(890);
     }
   });
 }
@@ -153,42 +155,43 @@ Future<void> initializeService() async {
     'safepulse_silent_v4', // Bumping ID to flush cache
     'SafePulse AI Service',
     description: 'Keeps SafePulse running silently in the background.',
-    importance: Importance.low, 
+    importance: Importance.low,
   );
 
   // Alert Silent Channel
   const AndroidNotificationChannel alertChannel = AndroidNotificationChannel(
-    'safepulse_alerts_v1', 
+    'safepulse_alerts_v1',
     'System Alerts',
     description: 'Warnings for GPS and Battery Saver.',
-    importance: Importance.low, 
+    importance: Importance.low,
   );
 
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
   await flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >()
       ?.createNotificationChannel(channel);
-      
+
   await flutterLocalNotificationsPlugin
-      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >()
       ?.createNotificationChannel(alertChannel);
 
   await service.configure(
     androidConfiguration: AndroidConfiguration(
-      onStart: onStart, 
-      autoStart: false, 
-      isForegroundMode: true, 
-      notificationChannelId: 'safepulse_silent_v4', 
+      onStart: onStart,
+      autoStart: false,
+      isForegroundMode: true,
+      notificationChannelId: 'safepulse_silent_v4',
       initialNotificationTitle: '🛡️ SafePulse AI Active',
       initialNotificationContent: 'Monitoring sensors...',
       foregroundServiceNotificationId: 888,
     ),
-    iosConfiguration: IosConfiguration(
-      autoStart: false,
-      onForeground: onStart,
-    ),
+    iosConfiguration: IosConfiguration(autoStart: false, onForeground: onStart),
   );
 }
 
@@ -261,28 +264,29 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    
+
     // Wait for the UI to render the first frame before throwing popups
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _requestAllPermissionsUpfront(); 
+      _requestAllPermissionsUpfront();
     });
 
     _loadAIModel();
-    _initTTS(); 
-    _initScreenState(); 
-    _startSpeedMonitoring(); 
+    _initTTS();
+    _initScreenState();
+    _startSpeedMonitoring();
   }
 
   Future<void> _requestAllPermissionsUpfront() async {
     addLog("🔒 Requesting system permissions...");
-    
+
     // 1. Request standard permissions first (DO NOT include locationAlways here)
-    Map<Permission, PermissionStatus> statuses = await [
-      Permission.location,
-      Permission.sms,
-      Permission.phone,
-      Permission.notification, 
-    ].request();
+    Map<Permission, PermissionStatus> statuses =
+        await [
+          Permission.location,
+          Permission.sms,
+          Permission.phone,
+          Permission.notification,
+        ].request();
 
     // 2. Request Background Location ONLY AFTER standard location is granted
     if (statuses[Permission.location]?.isGranted == true) {
@@ -293,8 +297,8 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
     }
 
     // Check if everything is good
-    if (await Permission.sms.isGranted && 
-        await Permission.phone.isGranted && 
+    if (await Permission.sms.isGranted &&
+        await Permission.phone.isGranted &&
         await Permission.location.isGranted) {
       addLog("✅ All critical permissions secured.");
     } else {
@@ -519,7 +523,7 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
     final service = FlutterBackgroundService();
     await service.startService();
 
-    // 2. Start UI Sensors 
+    // 2. Start UI Sensors
     sensorBuffer.clear();
 
     _accelSub = userAccelerometerEventStream().listen((event) {
@@ -552,7 +556,7 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
 
   void _stopMonitoring() {
     setState(() => isMonitoring = false);
-    
+
     // 🛑 1. SEND KILL SIGNAL TO BACKGROUND SERVICE
     FlutterBackgroundService().invoke('stopService');
 
@@ -594,7 +598,6 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
   // ==========================================
   // 🚀 PHASE 2: AUTOMATED SOS EXECUTION
   // ==========================================
-
 
   Future<void> triggerSOS() async {
     setState(() => isProcessing = true);
@@ -816,7 +819,7 @@ class _AutonomousSOSScreenState extends State<AutonomousSOSScreen>
                     ),
                   ),
                   Text(
-                    "Limit: ${useMs ? overspeedLimitMs.toStringAsFixed(1) + " m/s" : (overspeedLimitMs * 3.6).toStringAsFixed(1) + " km/h"}",
+                    "Limit: ${useMs ? "${overspeedLimitMs.toStringAsFixed(1)} m/s" : "${(overspeedLimitMs * 3.6).toStringAsFixed(1)} km/h"}",
                     style: const TextStyle(color: Colors.grey),
                   ),
                 ],

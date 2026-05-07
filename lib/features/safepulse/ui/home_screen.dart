@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import '../services/background_service.dart';
 import '../engine/safepulse_engine.dart';
+import '../services/api_service.dart';
 import '../../../core/enums.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -279,6 +280,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   ],
                 ),
               ),
+
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                padding: const EdgeInsets.symmetric(vertical: 20),
+              ),
+              onPressed: () async {
+                final apiService = ApiService();
+                await apiService.sendSOS(
+                  17.385,
+                  78.486,
+                  "HIGH",
+                );
+              },
+              child: const Text(
+                "TEST ONLINE SOS",
+                style: TextStyle(fontSize: 16, color: Colors.white, fontWeight: FontWeight.bold),
+              ),
+            ),
+            const SizedBox(height: 20),
 
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(

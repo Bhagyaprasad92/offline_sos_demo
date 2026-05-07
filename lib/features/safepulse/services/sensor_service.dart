@@ -14,14 +14,25 @@ class SensorService {
   Function(List<double> data)? onRawData;
   Function(String message)? onLog;
 
+  double avgGapMs = 20.0;
+  DateTime _lastTick = DateTime.now();
+
   int _accelRetryCount = 0;
   int _gyroRetryCount = 0;
 
   void start() {
+    if (_sensorTimer != null || _accelSub != null || _gyroSub != null) return;
+    
+    _lastTick = DateTime.now();
     _startAccel();
     _startGyro();
 
     _sensorTimer = Timer.periodic(const Duration(milliseconds: 20), (timer) {
+      final now = DateTime.now();
+      final gap = now.difference(_lastTick).inMilliseconds.toDouble();
+      avgGapMs = ((avgGapMs * 0.8) + (gap * 0.2)).clamp(20.0, 500.0);
+      _lastTick = now;
+
       if (onRawData != null) {
         onRawData!([_ax, _ay, _az, _gx, _gy, _gz]);
       }
@@ -30,11 +41,20 @@ class SensorService {
     onLog?.call("Sensors active. Reading at 50Hz.");
   }
 
-  void stop() {
+  Future<void> stop() async {
     _sensorTimer?.cancel();
-    _accelSub?.cancel();
-    _gyroSub?.cancel();
+    _sensorTimer = null;
+    await _accelSub?.cancel();
+    _accelSub = null;
+    await _gyroSub?.cancel();
+    _gyroSub = null;
     onLog?.call("Sensors stopped.");
+  }
+
+  Future<void> restart() async {
+    stop();
+    await Future.delayed(const Duration(seconds: 1));
+    start();
   }
 
   void _startAccel() {

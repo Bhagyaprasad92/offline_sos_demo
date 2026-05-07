@@ -3,43 +3,34 @@ import 'dart:convert';
 import 'dart:async';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:uuid/uuid.dart';
 import 'package:synchronized/synchronized.dart';
+import 'package:flutter/foundation.dart';
 
 class ApiService {
-  final String baseUrl = "http://your-server";
+  final String baseUrl = "http://10.101.100.36:8080";
   static const String _queueKey = 'sos_request_queue';
-  Function(String message)? onLog;
-  late StreamSubscription<List<ConnectivityResult>> _connectivitySub;
   final _lock = Lock();
 
-  Timer? _debounce;
-
-  ApiService() {
-    _connectivitySub = Connectivity().onConnectivityChanged.listen((List<ConnectivityResult> results) {
-      _debounce?.cancel();
-      _debounce = Timer(const Duration(seconds: 2), () {
-        if (!results.contains(ConnectivityResult.none)) {
-          onLog?.call("🌐 Internet connection active. Checking SOS queue...");
-          _retryQueuedRequests();
-        }
-      });
-    });
-  }
+  ApiService();
 
   void dispose() {
-    _connectivitySub.cancel();
   }
 
   bool _isFlushing = false;
 
-  Future<void> sendSOS(double lat, double lng, String severity, {bool hasLocation = true, int? locationAgeSec}) async {
+  Future<void> sendSOS(
+    double lat,
+    double lng,
+    String severity, {
+    bool hasLocation = true,
+    int? locationAgeSec,
+  }) async {
     final eventId = const Uuid().v4();
     final payload = {
-      "id": eventId,
-      "lat": lat,
-      "lng": lng,
+      "eventId": eventId,
+      "latitude": lat,
+      "longitude": lng,
       "locationStatus": hasLocation ? "OK" : "UNAVAILABLE",
       "locationAgeSec": locationAgeSec,
       "severity": severity,
@@ -47,20 +38,33 @@ class ApiService {
     };
 
     try {
-      final response = await http.post(
-        Uri.parse("$baseUrl/api/sos"),
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode(payload),
-      ).timeout(const Duration(seconds: 5));
+      if (kDebugMode) {
+        print("🚀 Sending payload:");
+        print(jsonEncode(payload));
+      }
+
+      final response = await http
+          .post(
+            Uri.parse("$baseUrl/api/sos"),
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (kDebugMode) {
+        print("✅ STATUS: ${response.statusCode}");
+        print("✅ BODY: ${response.body}");
+      }
 
       if (response.statusCode >= 200 && response.statusCode < 300) {
         // Success
-        await _retryQueuedRequests();
       } else {
         await _queueRequestLocally(payload, isCritical: true);
       }
     } catch (e) {
-      // Offline or server down
+      if (kDebugMode) {
+        print("❌ HTTP ERROR: $e");
+      }
       await _queueRequestLocally(payload, isCritical: true);
     }
   }
@@ -68,10 +72,13 @@ class ApiService {
   final List<String> _inMemoryQueue = [];
   bool _pendingWrite = false;
 
-  Future<void> _queueRequestLocally(Map<String, dynamic> payload, {bool isCritical = false}) async {
+  Future<void> _queueRequestLocally(
+    Map<String, dynamic> payload, {
+    bool isCritical = false,
+  }) async {
     await _lock.synchronized(() async {
       _inMemoryQueue.add(jsonEncode(payload));
-      
+
       if (_inMemoryQueue.length > 20) {
         _inMemoryQueue.removeAt(0);
       }
@@ -86,17 +93,17 @@ class ApiService {
 
   Future<void> _saveQueueImmediately() async {
     if (_inMemoryQueue.isEmpty) return;
-    
+
     final prefs = await SharedPreferences.getInstance();
     List<String> diskQueue = prefs.getStringList(_queueKey) ?? [];
-    
+
     diskQueue.addAll(_inMemoryQueue);
     _inMemoryQueue.clear();
-    
+
     if (diskQueue.length > 50) {
       diskQueue.removeRange(0, diskQueue.length - 50);
     }
-    
+
     await prefs.setStringList(_queueKey, diskQueue);
   }
 
@@ -112,7 +119,7 @@ class ApiService {
     });
   }
 
-  Future<void> _retryQueuedRequests() async {
+  Future<void> retryQueuedRequests() async {
     if (_isFlushing) return;
     _isFlushing = true;
 
@@ -122,17 +129,19 @@ class ApiService {
         final prefs = await SharedPreferences.getInstance();
         currentQueue = prefs.getStringList(_queueKey) ?? [];
       });
-      
+
       if (currentQueue.isEmpty) return;
 
       for (String itemStr in currentQueue) {
         bool success = false;
         try {
-          final response = await http.post(
-            Uri.parse("$baseUrl/api/sos"),
-            headers: {"Content-Type": "application/json"},
-            body: itemStr,
-          ).timeout(const Duration(seconds: 5));
+          final response = await http
+              .post(
+                Uri.parse("$baseUrl/api/sos"),
+                headers: {"Content-Type": "application/json"},
+                body: itemStr,
+              )
+              .timeout(const Duration(seconds: 5));
 
           if (response.statusCode >= 200 && response.statusCode < 300) {
             success = true;

@@ -8,6 +8,11 @@ class AIService {
   
   Function(double probability)? onCrashDetected;
   Function(String message)? onLog;
+  Function()? onInferenceAttempt;
+  Function()? onInferenceCompleted;
+
+  bool _isProcessing = false;
+  bool _resetting = false;
   
   Future<void> initialize() async {
     try {
@@ -19,6 +24,8 @@ class AIService {
   }
 
   void addData(List<double> data) {
+    if (_resetting) return;
+    
     _sensorBuffer.add(data);
 
     if (_sensorBuffer.length > 250) {
@@ -29,15 +36,29 @@ class AIService {
     double gForce = sqrt(pow(ax, 2) + pow(ay, 2) + pow(az, 2)) / 9.81;
 
     if (gForce > 3.0 && _sensorBuffer.length == 250) {
-      onLog?.call("⚠️ IMPACT: ${gForce.toStringAsFixed(1)} Gs. AI Analyzing...");
-      _runAIAnalysis(List.from(_sensorBuffer), gForce);
-      _sensorBuffer.clear();
+      if (!_isProcessing) {
+        onLog?.call("⚠️ IMPACT: ${gForce.toStringAsFixed(1)} Gs. AI Analyzing...");
+        _runAIAnalysis(List.from(_sensorBuffer), gForce);
+        if (!_resetting) {
+          _sensorBuffer.clear();
+        }
+      }
     }
+  }
+
+  void resetProcessingState() {
+    _resetting = true;
+    _isProcessing = false;
+    _sensorBuffer.clear();
+    _resetting = false;
   }
 
   int _recentSpikeCount = 0;
 
   void _runAIAnalysis(List<List<double>> windowToAnalyze, double maxGForce) {
+    _isProcessing = true;
+    onInferenceAttempt?.call();
+    
     if (_interpreter == null) {
       if (maxGForce > 5.0) {
         _recentSpikeCount++;
@@ -53,6 +74,8 @@ class AIService {
       } else {
         onLog?.call("⚠️ Impact filtered by Basic Threshold (AI offline)");
       }
+      _isProcessing = false;
+      onInferenceCompleted?.call();
       return;
     }
 
@@ -68,11 +91,13 @@ class AIService {
       } else {
         onLog?.call("✅ AI Filtered: Just a drop/bump. (${(crashProbability * 100).toStringAsFixed(1)}%)");
       }
-    } catch (e) {
       onLog?.call("❌ AI Error: $e. Falling back to basic threshold.");
       if (maxGForce > 5.0) {
         onCrashDetected?.call(1.0);
       }
+    } finally {
+      _isProcessing = false;
+      onInferenceCompleted?.call();
     }
   }
 

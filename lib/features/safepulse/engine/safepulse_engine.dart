@@ -11,6 +11,8 @@ import '../services/warning_service.dart';
 import '../../../core/enums.dart';
 
 enum EngineState { idle, monitoring, processingSos }
+enum EngineHealthState { active, recoveringSensors, recoveringAI, degraded, emergency }
+enum EngineSeverity { normal, warning, critical }
 
 class SafePulseEngine {
   SafePulseEngine() {
@@ -38,13 +40,56 @@ class SafePulseEngine {
   bool _isRunning = false;
   DateTime? _lastSosTime;
   
-  // System states synced from background isolate
   bool sysLocationOn = true;
   bool sysBatterySaverOn = false;
+
+  // --- Watchdog & Recovery State ---
+  DateTime _lastSensorEvent = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastInferenceAttempt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastInferenceCompleted = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool _sensorHealthy = true;
+  bool _aiHealthy = true;
+
+  bool _recoveringSensors = false;
+  bool _recoveringAI = false;
+  bool _recoveringEngine = false;
+  
+  int _degradedRecoveryAttempts = 0;
+  DateTime? _lastRecoveryTime;
+  
+  EngineHealthState healthState = EngineHealthState.active;
+  Timer? _watchdogTimer;
+  bool _stopping = false;
 
   bool get _sosLocked =>
       _lastSosTime != null &&
       DateTime.now().difference(_lastSosTime!) < const Duration(minutes: 1);
+
+  EngineSeverity get severity {
+    switch (healthState) {
+      case EngineHealthState.active:
+        return EngineSeverity.normal;
+      case EngineHealthState.recoveringSensors:
+      case EngineHealthState.recoveringAI:
+      case EngineHealthState.degraded:
+        return EngineSeverity.warning;
+      case EngineHealthState.emergency:
+        return EngineSeverity.critical;
+    }
+  }
+
+  void pingSensor() {
+    _lastSensorEvent = DateTime.now();
+  }
+
+  void pingAIAttempt() {
+    _lastInferenceAttempt = DateTime.now();
+  }
+
+  void pingAICompleted() {
+    _lastInferenceCompleted = DateTime.now();
+  }
 
   void _initializeServices() {
     warningService = WarningService(alertService);
@@ -69,7 +114,10 @@ class SafePulseEngine {
     };
 
     sensorService.onRawData = (data) {
-      aiService.addData(data);
+      pingSensor();
+      if (healthState != EngineHealthState.degraded) {
+        aiService.addData(data);
+      }
     };
 
     aiService.onCrashDetected = (probability) {
@@ -105,20 +153,124 @@ class SafePulseEngine {
   Future<void> start() async {
     if (_isRunning) return;
     _isRunning = true;
+    _stopping = false;
     
     _updateState(EngineState.monitoring);
+    healthState = EngineHealthState.active;
     log("🛡️ AI Dashcam STARTED in Background Isolate.");
+
+    _lastSensorEvent = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastInferenceAttempt = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastInferenceCompleted = DateTime.fromMillisecondsSinceEpoch(0);
 
     sensorService.start();
     locationService.startSpeedMonitoring();
+
+    _watchdogTimer?.cancel();
+    _watchdogTimer = Timer.periodic(const Duration(seconds: 5), (_) => _healthCheck());
   }
 
-  void stop() {
-    if (!_isRunning) return;
+  Future<void> _healthCheck() async {
+    if (_recoveringSensors || _recoveringAI || _recoveringEngine || _stopping) {
+      return; // Cascade prevention
+    }
+
+    final now = DateTime.now();
+    
+    // Calculate clamping & dynamic timeout
+    final avgGapMs = sensorService.avgGapMs;
+    final dynamicTimeoutSeconds = (avgGapMs * 10 / 1000).toInt();
+    final timeout = dynamicTimeoutSeconds.clamp(5, 25);
+    
+    final sensorDead = now.difference(_lastSensorEvent).inSeconds > timeout;
+    final aiStall = now.difference(_lastInferenceAttempt).inSeconds > 20 && 
+                    _lastInferenceAttempt.isAfter(_lastInferenceCompleted);
+
+    _sensorHealthy = !sensorDead;
+    _aiHealthy = !aiStall;
+
+    if (_sensorHealthy && _aiHealthy) {
+      if (healthState != EngineHealthState.active) {
+        healthState = EngineHealthState.active;
+        log("System fully recovered. Monitoring active.");
+      }
+      _degradedRecoveryAttempts = 0; // Reset budget
+      return;
+    }
+
+    if (avgGapMs > 200) {
+      log("Sensor cadence degraded: ${avgGapMs.toStringAsFixed(1)}ms gap", level: LogLevel.warning);
+    }
+
+    if (healthState == EngineHealthState.degraded) {
+      // Self-healing attempt
+      if (_degradedRecoveryAttempts < 5) {
+        _degradedRecoveryAttempts++;
+        log("Degraded Mode: Attempting lightweight recovery ($_degradedRecoveryAttempts/5)");
+        _recoverSensors(); 
+      }
+      return;
+    }
+
+    // Cooldown check
+    if (_lastRecoveryTime != null && now.difference(_lastRecoveryTime!).inSeconds < 20) {
+      return;
+    }
+
+    _lastRecoveryTime = now;
+    
+    if (sensorDead) {
+      _recoverSensors();
+    } else if (aiStall) {
+      _recoverAI();
+    }
+  }
+
+  Future<void> _recoverSensors() async {
+    _recoveringSensors = true;
+    healthState = healthState == EngineHealthState.degraded ? EngineHealthState.degraded : EngineHealthState.recoveringSensors;
+    log("Watchdog: Restarting sensors...", level: LogLevel.warning);
+    try {
+      await sensorService.restart();
+    } finally {
+      _recoveringSensors = false;
+      _checkDegradeEscalation();
+    }
+  }
+
+  Future<void> _recoverAI() async {
+    _recoveringAI = true;
+    healthState = EngineHealthState.recoveringAI;
+    log("Watchdog: Resetting AI pipeline...", level: LogLevel.warning);
+    try {
+      aiService.resetProcessingState();
+    } finally {
+      _recoveringAI = false;
+      _checkDegradeEscalation();
+    }
+  }
+
+  void _checkDegradeEscalation() {
+    if (healthState != EngineHealthState.degraded) {
+      _degradedRecoveryAttempts++;
+      if (_degradedRecoveryAttempts >= 3) {
+        healthState = EngineHealthState.degraded;
+        log("Watchdog: Recovery limit exceeded. Entering Degraded Mode.", level: LogLevel.critical);
+        // autonomous AI triggers are blocked in onRawData if degraded
+      }
+    }
+  }
+
+  Future<void> stop() async {
+    if (_stopping || !_isRunning) return;
+    _stopping = true;
     _isRunning = false;
     
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
+    
     _updateState(EngineState.idle);
-    sensorService.stop();
+    await sensorService.stop();
     locationService.stop();
     log("🛑 AI Dashcam STOPPED.");
   }

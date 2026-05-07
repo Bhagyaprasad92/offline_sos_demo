@@ -8,6 +8,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/widgets.dart';
 import '../engine/safepulse_engine.dart';
+import '../../../core/enums.dart';
+import 'dart:math';
 
 @pragma('vm:entry-point')
 void notificationTapBackground(NotificationResponse notificationResponse) async {
@@ -45,24 +47,48 @@ void onStart(ServiceInstance service) async {
 
   final Battery battery = Battery();
 
+  Timer? _statusTimer;
+  Timer? _watchdogTimer;
+  Timer? _retryTimer;
+  bool _retryLoopRunning = true;
+  String _lastNotificationText = "";
+
+  void scheduleRetry() {
+    if (!_retryLoopRunning) return;
+    final delay = 60 + Random().nextInt(15);
+    _retryTimer = Timer(Duration(seconds: delay), () async {
+      await engine.apiService.retryQueuedRequests();
+      scheduleRetry();
+    });
+  }
+
+  scheduleRetry();
+
   service.on('stopService').listen((event) async {
-    engine.stop();
+    _statusTimer?.cancel();
+    _watchdogTimer?.cancel();
+    _retryLoopRunning = false;
+    _retryTimer?.cancel();
+    await engine.stop();
     await flutterLocalNotificationsPlugin.cancelAll();
     service.stopSelf();
   });
 
-  Timer.periodic(const Duration(seconds: 2), (timer) async {
+  _statusTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
     final prefs = await SharedPreferences.getInstance();
     if (!(prefs.getBool("isMonitoring") ?? false)) {
-      engine.stop();
+      _statusTimer?.cancel();
+      _watchdogTimer?.cancel();
+      _retryLoopRunning = false;
+      _retryTimer?.cancel();
+      await engine.stop();
       await flutterLocalNotificationsPlugin.cancelAll();
       service.stopSelf();
-      timer.cancel();
       return;
     }
   });
 
-  Timer.periodic(const Duration(seconds: 5), (timer) async {
+  _watchdogTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
     final prefs = await SharedPreferences.getInstance();
     if (!(prefs.getBool("isMonitoring") ?? false)) {
       timer.cancel();
@@ -70,20 +96,52 @@ void onStart(ServiceInstance service) async {
     }
     if (service is AndroidServiceInstance) {
       if (await service.isForegroundService()) {
-        flutterLocalNotificationsPlugin.show(
-          888,
-          '🛡️ SafePulse AI Active',
-          'Monitoring sensors and location autonomously.',
-          const NotificationDetails(
-            android: AndroidNotificationDetails(
-              'safepulse_silent_v4',
-              'SafePulse AI Service',
-              ongoing: true,
-              importance: Importance.low,
-              priority: Priority.low,
+        String notificationTitle = '🛡️ SafePulse AI Active';
+        String notificationBody = 'Monitoring sensors and location autonomously.';
+        Importance importance = Importance.low;
+        Priority priority = Priority.low;
+
+        switch (engine.healthState) {
+          case EngineHealthState.recoveringSensors:
+            notificationBody = 'Recovering sensors...';
+            break;
+          case EngineHealthState.recoveringAI:
+            notificationBody = 'Recovering AI pipeline...';
+            break;
+          case EngineHealthState.degraded:
+            notificationTitle = '⚠️ SafePulse Degraded Mode';
+            notificationBody = 'Crash AI unavailable. Manual SOS still active.';
+            importance = Importance.high;
+            priority = Priority.high;
+            break;
+          case EngineHealthState.emergency:
+            notificationTitle = '🚨 SOS TRIGGERED';
+            notificationBody = 'Emergency protocol active.';
+            importance = Importance.high;
+            priority = Priority.high;
+            break;
+          default:
+            break;
+        }
+
+        final currentText = "$notificationTitle:$notificationBody";
+        if (currentText != _lastNotificationText) {
+          _lastNotificationText = currentText;
+          flutterLocalNotificationsPlugin.show(
+            888,
+            notificationTitle,
+            notificationBody,
+            NotificationDetails(
+              android: AndroidNotificationDetails(
+                'safepulse_silent_v4',
+                'SafePulse AI Service',
+                ongoing: true,
+                importance: importance,
+                priority: priority,
+              ),
             ),
-          ),
-        );
+          );
+        }
       }
     }
 
@@ -103,8 +161,8 @@ void onStart(ServiceInstance service) async {
           android: AndroidNotificationDetails(
             'safepulse_alerts_v1',
             'System Alerts',
-            importance: Importance.low,
-            priority: Priority.low,
+            importance: Importance.high,
+            priority: Priority.high,
           ),
         ),
       );
@@ -129,8 +187,8 @@ void onStart(ServiceInstance service) async {
           android: AndroidNotificationDetails(
             'safepulse_alerts_v1',
             'System Alerts',
-            importance: Importance.low,
-            priority: Priority.low,
+            importance: Importance.high,
+            priority: Priority.high,
             actions: <AndroidNotificationAction>[
               AndroidNotificationAction(
                 'hide_battery_alert',
